@@ -5,7 +5,7 @@ import numpy as np
 from utils.alphabet import Alphabet
 from utils.functions import *
 from utils.gazetteer import Gazetteer
-
+import torch
 
 START = "</s>"
 UNKNOWN = "</unk>"
@@ -82,6 +82,10 @@ class Data:
 
         self.HP_num_layer = 4
 
+        self.train_relay_emb = None
+        self.dev_relay_emb = None
+        self.test_relay_emb = None
+
         
     def show_data_summary(self):
         print("DATA SUMMARY START:")
@@ -152,6 +156,7 @@ class Data:
         print("Refresh label alphabet finished: old:%s -> new:%s"%(old_size, self.label_alphabet_size))
 
 
+    # 构建词表，遍历数据集，从中找到词、二元词、字、标签四种类型的字母表，并且确定数据标注方式BMES/BIO
     def build_alphabet(self, input_file):
         in_lines = open(input_file,'r',encoding="utf-8").readlines()
         seqlen = 0
@@ -161,7 +166,7 @@ class Data:
                 pairs = line.strip().split()
                 word = pairs[0]
                 if self.number_normalized:
-                    word = normalize_word(word)
+                    word = normalize_word(word) # 如果是数字，直接替换为0
                 label = pairs[-1]
                 self.label_alphabet.add(label)
                 self.word_alphabet.add(word)
@@ -196,6 +201,7 @@ class Data:
             else:
                 self.tagScheme = "BIO"
 
+    # 使用词嵌入表，构建前缀树，并将词设置entity2type和entity2id
     def build_gaz_file(self, gaz_file):
         ## build gaz file,initial read gaz embedding file
         if gaz_file:
@@ -208,7 +214,7 @@ class Data:
         else:
             print ("Gaz file is None, load nothing")
 
-
+    # 使用数据集，获取每句话的word_list、然后利用前缀树匹配到的词的列表，将匹配到的词加入gaz_alphabet中
     def build_gaz_alphabet(self, input_file, count=False):
         in_lines = open(input_file,'r',encoding="utf-8").readlines()
         word_list = []
@@ -229,15 +235,17 @@ class Data:
                         self.gaz_alphabet.add(entity)
                         index = self.gaz_alphabet.get_index(entity)
 
-
+                        # 初始化gaz_count，如果已存在，使用已存在的值，如果未存在设置为0
                         self.gaz_count[index] = self.gaz_count.get(index,0)  ## initialize gaz count
 
 
                 if count:
                     entitys.sort(key=lambda x:-len(x))
                     while entitys:
+                        # 利用前缀树匹配到词的最大长度。
                         longest = entitys[0]
                         longest_index = self.gaz_alphabet.get_index(longest)
+                        # 如果count为true，将匹配到最大长度的词的gaz_count索引+1
                         self.gaz_count[longest_index] = self.gaz_count.get(longest_index, 0) + 1
 
                         gazlen = len(longest)
@@ -310,6 +318,22 @@ class Data:
         fout.close()
         print("Predict %s result has been written into file. %s"%(name, output_file))
 
+    def build_relay_emb(self, relay_emb_file, relay_type):
+        if relay_type == 'train':
+            train_relay_emb = torch.load(relay_emb_file)
+            tail = train_relay_emb[-8:]
+            head = train_relay_emb[0:8]
+            self.train_relay_emb = torch.cat([torch.cat([tail, train_relay_emb], dim=0), head], dim=0)
+        if relay_type == 'dev':
+            dev_relay_emb = torch.load(relay_emb_file)
+            tail = dev_relay_emb[-8:]
+            head = dev_relay_emb[0:8]
+            self.dev_relay_emb = torch.cat([torch.cat([tail, dev_relay_emb], dim=0), head], dim=0)
+        if relay_type == 'test':
+            test_relay_emb = torch.load(relay_emb_file)
+            tail = test_relay_emb[-8:]
+            head = test_relay_emb[0:8]
+            self.test_relay_emb = torch.cat([torch.cat([tail, test_relay_emb], dim=0), head], dim=0)
 
 
 

@@ -14,6 +14,7 @@ class Gazetteer:
         match_list = self.trie.enumerateMatch(word_list, self.space)
         return match_list
 
+    # 插入前缀树，并设置entity2type和entity2id
     def insert(self, word_list, source):
         if self.lower:
             word_list = [word.lower() for word in word_list]

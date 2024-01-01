@@ -1,1 +1,1 @@
-python main.py --train data/demo.train.char --dev data/demo.dev.char --test data/demo.test.char --modelname demo --savedset data/data.dset
+nohup python main.py > result/resume-masked-2.log 2>&1 &

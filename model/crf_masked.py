@@ -29,7 +29,7 @@ def log_sum_exp(vec, m_size):
 
 class CRF(nn.Module):
 
-    def __init__(self, tagset_size, gpu):
+    def __init__(self, tagset_size, gpu, label2idx):
         super(CRF, self).__init__()
         print ("build batched crf...")
         self.gpu = gpu
@@ -47,12 +47,63 @@ class CRF(nn.Module):
         if self.gpu:
             init_transitions = init_transitions.cuda(1)
         self.transitions = nn.Parameter(init_transitions)  #(t+2,t+2)
+        self.label2idx_map = label2idx
+        self.mask_tran_matrix = torch.tensor(self.get_mask_trans()).cuda(1)
+
 
         # self.transitions = nn.Parameter(torch.Tensor(self.tagset_size+2, self.tagset_size+2))
         # self.transitions.data.zero_()
+    # Masked matrix
+    def get_mask_trans(self):
+        size = len(self.label2idx_map)
+        tag_lst = self.label2idx_map.keys()
 
-    # 是条件随机场中用于计算分区函数（partition function）的部分，分区函数在CRF中用于归一化概率，以确保预测的概率总和为1，
-    # 在CRF中，分区函数是所有可能标签序列的概率之和的对数，它是CRF模型计算损失函数和进行解码时的核心部分。
+        mask_mat = np.ones(shape=(size + 2, size + 2), dtype=np.float32)
+        # analysis tag schema，BIO or BIOES
+        is_scheme_bioes = False
+        flag_e = False
+        flag_s = False
+        for tag in tag_lst:
+            if tag.startswith("E-"):
+                flag_e = True
+
+            if tag.startswith("S-"):
+                flag_s = True
+
+        if flag_e and flag_s:
+            is_scheme_bioes = True
+            # logging.info("BIOES format tagging scheme detected.")
+        else:
+            pass
+            # logging.info("BIO format tagging scheme detected.")
+
+        for col_tag, col_index in self.label2idx_map.items():
+            if col_tag.startswith("I-"):
+                slot_name = col_tag.replace("I-", "")
+                begin_slot = "B-" + slot_name
+                for row_tag, row_index in self.label2idx_map.items():
+                    # I-city must follow B-city or I-city
+                    if row_tag != begin_slot and row_tag != col_tag:
+                        mask_mat[row_index, col_index] = -1.0
+
+            if is_scheme_bioes:
+                if col_tag.startswith("E-"):
+                    slot_name = col_tag.replace("E-", "")
+                    intermediate_slot = "I-" + slot_name
+                    begin_slot = "B-" + slot_name
+                    for row_tag, row_index in self.label2idx_map.items():
+                        # E-city must follow I-city or B-city
+                        if row_tag != intermediate_slot and row_tag != begin_slot:
+                            mask_mat[row_index, col_index] = -1.0
+
+                if col_tag.startswith("S-") or col_tag.startswith("B-"):
+                    for row_tag, row_index in self.label2idx_map.items():
+                        # S-city must not follow B-slot or I-slot
+                        if row_tag.startswith("B-") or row_tag.startswith("I-"):
+                            mask_mat[row_index, col_index] = -1.0
+
+        return 100 * mask_mat
+    
     def _calculate_PZ(self, feats, mask):
         """
             input:
@@ -69,7 +120,7 @@ class CRF(nn.Module):
         ## be careful the view shape, it is .view(ins_num, 1, tag_size) but not .view(ins_num, tag_size, 1)
         feats = feats.transpose(1,0).contiguous().view(ins_num,1, tag_size).expand(ins_num, tag_size, tag_size)
         ## need to consider start
-        scores = feats + self.transitions.view(1,tag_size,tag_size).expand(ins_num, tag_size, tag_size)
+        scores = feats + self.transitions.min(self.mask_tran_matrix).view(1,tag_size,tag_size).expand(ins_num, tag_size, tag_size)
         scores = scores.view(seq_len, batch_size, tag_size, tag_size)
         # build iter
         seq_iter = enumerate(scores)   # (index,matrix) index is among the first dim: seqlen
@@ -101,7 +152,7 @@ class CRF(nn.Module):
             ## replace the partition where the maskvalue=1, other partition value keeps the same
             partition.masked_scatter_(mask_idx.bool(), masked_cur_partition)
         # until the last state, add transition score for all partition (and do log_sum_exp) then select the value in STOP_TAG
-        cur_values = self.transitions.view(1,tag_size, tag_size).expand(batch_size, tag_size, tag_size) + partition.contiguous().view(batch_size, tag_size, 1).expand(batch_size, tag_size, tag_size)
+        cur_values = self.transitions.min(self.mask_tran_matrix).view(1,tag_size, tag_size).expand(batch_size, tag_size, tag_size) + partition.contiguous().view(batch_size, tag_size, 1).expand(batch_size, tag_size, tag_size)
         cur_partition = log_sum_exp(cur_values, tag_size)  #(batch_size,hidden_dim)
         final_partition = cur_partition[:, STOP_TAG]  #(batch_size)
         return final_partition.sum(), scores #scores: (seq_len, batch, tag_size, tag_size)
@@ -128,7 +179,7 @@ class CRF(nn.Module):
         ## be careful the view shape, it is .view(ins_num, 1, tag_size) but not .view(ins_num, tag_size, 1)
         feats = feats.transpose(1,0).contiguous().view(ins_num, 1, tag_size).expand(ins_num, tag_size, tag_size)  #(ins_num, tag_size, tag_size)
         ## need to consider start
-        scores = feats + self.transitions.view(1,tag_size,tag_size).expand(ins_num, tag_size, tag_size)
+        scores = feats + self.transitions.min(self.mask_tran_matrix).view(1,tag_size,tag_size).expand(ins_num, tag_size, tag_size)
         scores = scores.view(seq_len, batch_size, tag_size, tag_size)
 
         # build iter
@@ -166,7 +217,7 @@ class CRF(nn.Module):
         last_position = length_mask.view(batch_size,1,1).expand(batch_size, 1, tag_size) -1
         last_partition = torch.gather(partition_history, 1, last_position).view(batch_size,tag_size,1)
         ### calculate the score from last partition to end state (and then select the STOP_TAG from it)
-        last_values = last_partition.expand(batch_size, tag_size, tag_size) + self.transitions.view(1,tag_size, tag_size).expand(batch_size, tag_size, tag_size)
+        last_values = last_partition.expand(batch_size, tag_size, tag_size) + self.transitions.min(self.mask_tran_matrix).view(1,tag_size, tag_size).expand(batch_size, tag_size, tag_size)
         _, last_bp = torch.max(last_values, 1)  #(batch_size,tag_size)
         pad_zero = autograd.Variable(torch.zeros(batch_size, tag_size)).long()
         if self.gpu:
@@ -230,7 +281,7 @@ class CRF(nn.Module):
                 new_tags[:,idx] =  tags[:,idx-1]*tag_size + tags[:,idx]
 
         ## transition for label to STOP_TAG
-        end_transition = self.transitions[:,STOP_TAG].contiguous().view(1, tag_size).expand(batch_size, tag_size)
+        end_transition = self.transitions.min(self.mask_tran_matrix)[:,STOP_TAG].contiguous().view(1, tag_size).expand(batch_size, tag_size)
         ## length for batch,  last word position = length - 1
         length_mask = torch.sum(mask.long(), dim = 1).view(batch_size,1).long()
         ## index the label id of last word

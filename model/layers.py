@@ -19,9 +19,9 @@ class CNNmodel(nn.Module):
         self.drop = nn.Dropout(dropout)
 
         if self.gpu:
-            self.cnn_layer0 = self.cnn_layer0.cuda()
+            self.cnn_layer0 = self.cnn_layer0.cuda(1)
             for i in range(self.num_layer-1):
-                self.cnn_layers[i] = self.cnn_layers[i].cuda()
+                self.cnn_layers[i] = self.cnn_layers[i].cuda(1)
 
     def forward(self, input_feature):
 

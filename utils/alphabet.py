@@ -6,7 +6,7 @@ Alphabet maps objects to integer ids. It provides two way mapping from the index
 import json
 import os
 
-
+# Alphabet，初始化有UNKNOWN、label、instance2index、instances、keep_growing、default_index、next_index等属性
 class Alphabet:
     def __init__(self, name, label=False, keep_growing=True):
         self.__name = name
@@ -22,6 +22,7 @@ class Alphabet:
         if not self.label:
             self.add(self.UNKNOWN)
 
+    # 清除Alphabet中所有内容
     def clear(self, keep_growing=True):
         self.instance2index = {}
         self.instances = []
@@ -30,7 +31,8 @@ class Alphabet:
         # Index 0 is occupied by default, all else following.
         self.default_index = 0
         self.next_index = 1
-        
+
+    # 如果要添加的实例不再instance2index，即索引中，instances中添加实例，instance2index添加索引。
     def add(self, instance):
         if instance not in self.instance2index:
             self.instances.append(instance)

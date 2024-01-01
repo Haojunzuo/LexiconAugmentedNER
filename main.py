@@ -23,13 +23,19 @@ from utils.data import Data
 
 
 def data_initialization(data, gaz_file, train_file, dev_file, test_file):
+    # 使用数据集（训练、验证和测试）构建字、词、二元词、标签的字母表。
     data.build_alphabet(train_file)
     data.build_alphabet(dev_file)
     data.build_alphabet(test_file)
+    # 使用词嵌入构建前缀树
     data.build_gaz_file(gaz_file)
+
+    # 使用数据集，获取每句话的word_list、然后利用前缀树匹配到的词的列表，将匹配到的词加入gaz_alphabet中
     data.build_gaz_alphabet(train_file,count=True)
     data.build_gaz_alphabet(dev_file,count=True)
     data.build_gaz_alphabet(test_file,count=True)
+
+    # keep_grow设置为false
     data.fix_alphabet()
     return data
 
@@ -156,7 +162,8 @@ def evaluate(data, model, name):
             if not instance:
                 continue
             gaz_list,batch_word, batch_biword, batch_wordlen, batch_label, layer_gaz, gaz_count, gaz_chars, gaz_mask, gazchar_mask, mask, batch_bert, bert_mask  = batchify_with_label(instance, data.HP_gpu, data.HP_num_layer, True)
-            tag_seq, gaz_match = model(gaz_list,batch_word, batch_biword, batch_wordlen, layer_gaz, gaz_count,gaz_chars, gaz_mask, gazchar_mask, mask, batch_bert, bert_mask)
+            # 执行forward方法，运行模型。
+            tag_seq, gaz_match = model(gaz_list,batch_word, batch_biword, batch_wordlen, layer_gaz, gaz_count,gaz_chars, gaz_mask, gazchar_mask, mask, batch_bert, bert_mask, name, batch_id, batch_size)
 
             gaz_list = [data.gaz_alphabet.get_instance(id) for batchlist in gaz_match if len(batchlist)>0 for id in batchlist ]
             gazes.append( gaz_list)
@@ -169,6 +176,7 @@ def evaluate(data, model, name):
             gold_results += gold_label
     decode_time = time.time() - start_time
     speed = len(instances)/decode_time
+    # 调用get_ner_fmeasure，根据真实标签，预测标签和标注方案获得acc、p、r、f等数据
     acc, p, r, f = get_ner_fmeasure(gold_results, pred_results, data.tagScheme)
     return speed, acc, p, r, f, pred_results, gazes
 
@@ -201,7 +209,7 @@ def batchify_with_label(input_batch_list, gpu, num_layer, volatile_flag=False):
     bert_ids = [sent[10] for sent in input_batch_list]
 
     word_seq_lengths = torch.LongTensor(list(map(len, words)))
-    max_seq_len = word_seq_lengths.max()
+    max_seq_len = word_seq_lengths.max()  # 每一个batch取最长的输入序列
     word_seq_tensor = autograd.Variable(torch.zeros((batch_size, max_seq_len))).long()
     biword_seq_tensor = autograd.Variable(torch.zeros((batch_size, max_seq_len))).long()
     label_seq_tensor = autograd.Variable(torch.zeros((batch_size, max_seq_len))).long()
@@ -239,18 +247,18 @@ def batchify_with_label(input_batch_list, gpu, num_layer, volatile_flag=False):
 
 
     if gpu:
-        word_seq_tensor = word_seq_tensor.cuda()
-        biword_seq_tensor = biword_seq_tensor.cuda()
-        word_seq_lengths = word_seq_lengths.cuda()
-        label_seq_tensor = label_seq_tensor.cuda()
-        layer_gaz_tensor = layer_gaz_tensor.cuda()
-        gaz_chars_tensor = gaz_chars_tensor.cuda()
-        gaz_mask_tensor = gaz_mask_tensor.cuda()
-        gazchar_mask_tensor = gazchar_mask_tensor.cuda()
-        gaz_count_tensor = gaz_count_tensor.cuda()
-        mask = mask.cuda()
-        bert_seq_tensor = bert_seq_tensor.cuda()
-        bert_mask = bert_mask.cuda()
+        word_seq_tensor = word_seq_tensor.cuda(1)
+        biword_seq_tensor = biword_seq_tensor.cuda(1)
+        word_seq_lengths = word_seq_lengths.cuda(1)
+        label_seq_tensor = label_seq_tensor.cuda(1)
+        layer_gaz_tensor = layer_gaz_tensor.cuda(1)
+        gaz_chars_tensor = gaz_chars_tensor.cuda(1)
+        gaz_mask_tensor = gaz_mask_tensor.cuda(1)
+        gazchar_mask_tensor = gazchar_mask_tensor.cuda(1)
+        gaz_count_tensor = gaz_count_tensor.cuda(1)
+        mask = mask.cuda(1)
+        bert_seq_tensor = bert_seq_tensor.cuda(1)
+        bert_mask = bert_mask.cuda(1)
 
     # print(bert_seq_tensor.type())
     return gazs, word_seq_tensor, biword_seq_tensor, word_seq_lengths, label_seq_tensor, layer_gaz_tensor, gaz_count_tensor,gaz_chars_tensor, gaz_mask_tensor, gazchar_mask_tensor, mask, bert_seq_tensor, bert_mask
@@ -263,13 +271,14 @@ def train(data, save_model_dir, seg=True):
 
     #data.show_data_summary()
 
-
+    # 根据data初始化模型，有LSTM、CNN和Transformer三种模型可选。
     model = SeqModel(data)
     print( "finish building model.")
 
     parameters = filter(lambda p: p.requires_grad, model.parameters())
-    optimizer = optim.Adamax(parameters, lr=data.HP_lr)
+    optimizer = optim.Adamax(parameters, lr=data.HP_lr) # Adamax优化器
 
+    # dev/dev_p/dev_r/test/test_p/test_r都初始化为-1
     best_dev = -1
     best_dev_p = -1
     best_dev_r = -1
@@ -284,6 +293,7 @@ def train(data, save_model_dir, seg=True):
         epoch_start = time.time()
         temp_start = epoch_start
         print(("Epoch: %s/%s" %(idx,data.HP_iteration)))
+        # 学习率衰减
         optimizer = lr_decay(optimizer, idx, data.HP_lr_decay, data.HP_lr)
         instance_count = 0
         sample_loss = 0
@@ -309,11 +319,12 @@ def train(data, save_model_dir, seg=True):
             words = data.train_texts[start:end]
             if not instance:
                 continue
-
+            # 获取每批数据对应的gaz_list, batch_word, batch_biword, batch_bert等，本函数目的在于获取每批数据的具体内容，方便后续训练。
             gaz_list,  batch_word, batch_biword, batch_wordlen, batch_label, layer_gaz, gaz_count, gaz_chars, gaz_mask, gazchar_mask, mask, batch_bert, bert_mask = batchify_with_label(instance, data.HP_gpu,data.HP_num_layer)
 
             instance_count += 1
-            loss, tag_seq = model.neg_log_likelihood_loss(gaz_list, batch_word, batch_biword, batch_wordlen, layer_gaz, gaz_count,gaz_chars, gaz_mask, gazchar_mask, mask, batch_label, batch_bert, bert_mask)
+            # 负对数似然损失
+            loss, tag_seq = model.neg_log_likelihood_loss(gaz_list, batch_word, batch_biword, batch_wordlen, layer_gaz, gaz_count,gaz_chars, gaz_mask, gazchar_mask, mask, batch_label, batch_bert, bert_mask, batch_id, batch_size)
 
             right, whole = predict_check(tag_seq, batch_label, mask)
             right_token += right
@@ -322,6 +333,7 @@ def train(data, save_model_dir, seg=True):
             total_loss += loss.data
             batch_loss += loss
 
+            # 每500个数据记录一次
             if end%500 == 0:
                 temp_time = time.time()
                 temp_cost = temp_time - temp_start
@@ -329,6 +341,7 @@ def train(data, save_model_dir, seg=True):
                 print(("     Instance: %s; Time: %.2fs; loss: %.4f; acc: %s/%s=%.4f"%(end, temp_cost, sample_loss, right_token, whole_token,(right_token+0.)/whole_token)))
                 sys.stdout.flush()
                 sample_loss = 0
+            # 每批数据计算梯度并优化
             if end%data.HP_batch_size == 0:
                 batch_loss.backward()
                 optimizer.step()
@@ -342,6 +355,7 @@ def train(data, save_model_dir, seg=True):
         epoch_cost = epoch_finish - epoch_start
         print(("Epoch: %s training finished. Time: %.2fs, speed: %.2fst/s,  total loss: %s"%(idx, epoch_cost, train_num/epoch_cost, total_loss)))
 
+        # 测试验证集
         speed, acc, p, r, f, pred_labels, gazs = evaluate(data, model, "dev")
         dev_finish = time.time()
         dev_cost = dev_finish - epoch_finish
@@ -367,6 +381,7 @@ def train(data, save_model_dir, seg=True):
             best_dev_r = r
 
         # ## decode test
+        # 测试测试集
         speed, acc, p, r, f, pred_labels, gazs = evaluate(data, model, "test")
         test_finish = time.time()
         test_cost = test_finish - dev_finish
@@ -377,6 +392,7 @@ def train(data, save_model_dir, seg=True):
             current_test_score = acc
             print(("Test: time: %.2fs, speed: %.2fst/s; acc: %.4f"%(test_cost, speed, acc)))
 
+        # 如果验证集获得新高分，进行记录，并更新测试集数据
         if current_score > best_dev:
             best_dev = current_score
             best_test = current_test_score
@@ -387,6 +403,7 @@ def train(data, save_model_dir, seg=True):
         print("Test score: p:{}, r:{}, f:{}".format(best_test_p,best_test_r,best_test))
         gc.collect()
 
+    # 所有epoch运行完之后，以追加形式写入日志文件最终结果
     with open(data.result_file,"a") as f:
         f.write(save_model_dir+'\n')
         f.write("Best dev score: p:{}, r:{}, f:{}\n".format(best_dev_p,best_dev_r,best_dev))
@@ -428,9 +445,13 @@ if __name__ == '__main__':
     parser.add_argument('--modelpath', default="save_model/")
     parser.add_argument('--modelname', default="model")
     parser.add_argument('--savedset', help='Dir of saved data setting', default="data/save.dset")
-    parser.add_argument('--train', default="ResumeNER/train.char.bmes")
-    parser.add_argument('--dev', default="ResumeNER/dev.char.bmes" )
-    parser.add_argument('--test', default="ResumeNER/test.char.bmes")
+    parser.add_argument('--train', default="./data/ResumeNER/train.char.bmes")
+    parser.add_argument('--dev', default="./data/ResumeNER/dev.char.bmes" )
+    parser.add_argument('--test', default="./data/ResumeNER/test.char.bmes")
+
+    parser.add_argument('--train_relay_emb', default="./data/relay/resume/train-star-unsupervised.pt")
+    parser.add_argument('--dev_relay_emb', default="./data/relay/resume/dev-star-unsupervised.pt" )
+    parser.add_argument('--test_relay_emb', default="./data/relay/resume/test-star-unsupervised.pt")
     parser.add_argument('--seg', default="True")
     parser.add_argument('--extendalphabet', default="True")
     parser.add_argument('--raw')
@@ -438,7 +459,7 @@ if __name__ == '__main__':
     parser.add_argument('--seed',default=1023,type=int)
     parser.add_argument('--labelcomment', default="")
     parser.add_argument('--resultfile',default="result/result.txt")
-    parser.add_argument('--num_iter',default=100,type=int)
+    parser.add_argument('--num_iter',default=50,type=int)
     parser.add_argument('--num_layer', default=4, type=int)
     parser.add_argument('--lr', type=float, default=0.0015)
     parser.add_argument('--batch_size', type=int, default=1)
@@ -451,7 +472,9 @@ if __name__ == '__main__':
     parser.add_argument('--use_char', dest='use_char', action='store_true', default=False)
     # parser.set_defaults(use_biword=False)
     parser.add_argument('--use_count', action='store_true', default=True)
-    parser.add_argument('--use_bert', action='store_true', default=False)
+    parser.add_argument('--use_bert', action='store_true', default=True)
+    parser.add_argument('--window_size', default=2)
+
 
     args = parser.parse_args()
 
@@ -462,6 +485,10 @@ if __name__ == '__main__':
     dev_file = args.dev
     test_file = args.test
     raw_file = args.raw
+    train_relay_emb = args.train_relay_emb
+    dev_relay_emb = args.dev_relay_emb
+    test_relay_emb = args.test_relay_emb
+
     # model_dir = args.loadmodel
     output_file = args.output
     if args.seg.lower() == "true":
@@ -474,9 +501,9 @@ if __name__ == '__main__':
     save_data_name = args.savedset
     gpu = torch.cuda.is_available()
 
-    char_emb = "../CNNNERmodel/data/gigaword_chn.all.a2b.uni.ite50.vec"
-    bichar_emb = "../CNNNERmodel/data/gigaword_chn.all.a2b.bi.ite50.vec"
-    gaz_file = "../CNNNERmodel/data/ctb.50d.vec"
+    char_emb = "./data/gigaword_chn.all.a2b.uni.ite50.vec"  # 二元词嵌入
+    bichar_emb = "./data/gigaword_chn.all.a2b.bi.ite50.vec"  # 字嵌入
+    gaz_file = "./data/ctb.50d.vec"  # 词嵌入
 
     sys.stdout.flush()
 
@@ -498,6 +525,7 @@ if __name__ == '__main__':
             data.HP_use_count = args.use_count
             data.model_type = args.model_type
             data.use_bert = args.use_bert
+            data.window_size = args.window_size
         else:
             data = Data()
             data.HP_gpu = gpu
@@ -516,15 +544,27 @@ if __name__ == '__main__':
             data.HP_use_count = args.use_count
             data.model_type = args.model_type
             data.use_bert = args.use_bert
+            # 构建字、词、二元词、标签的字母表；前缀树；gaz字母表。
             data_initialization(data, gaz_file, train_file, dev_file, test_file)
+            # 使用数据集、词、字、二元词、gaz、标签字母表、构建instence_texts和instance_ids，也就是使用每个句子获得其中的词列表、字列表、二元词列表、gaz列表等，方便训练时使用。
+            # 其中instance_ids包含：[word_Ids, biword_Ids, char_Ids, gaz_Ids, label_Ids, gazs, gazs_count, gaz_char_Id, layergazmasks,gazchar_masks, bert_text_ids]
             data.generate_instance_with_gaz(train_file,'train')
             data.generate_instance_with_gaz(dev_file,'dev')
             data.generate_instance_with_gaz(test_file,'test')
-            data.build_word_pretrain_emb(char_emb)
-            data.build_biword_pretrain_emb(bichar_emb)
-            data.build_gaz_pretrain_emb(gaz_file)
 
+            # 构建词嵌入矩阵：[word_alphabet.size(), embedd_dim]，并构建预训练词嵌入的存储结构，词表（数据集）中的词如果不在词典中，会随机初始化，并设置not_match++，如果匹配则使用词向量。
+            data.build_word_pretrain_emb(char_emb)
+            # 构建二元词嵌入矩阵，调用方法统构建词嵌入矩阵
+            data.build_biword_pretrain_emb(bichar_emb)
+            # 构建gaz嵌入矩阵
+            data.build_gaz_pretrain_emb(gaz_file)
+            # 构建中继节点嵌入矩阵
+            data.build_relay_emb(train_relay_emb, 'train')
+            data.build_relay_emb(dev_relay_emb, 'dev')
+            data.build_relay_emb(test_relay_emb, 'test')
+            data.window_size = args.window_size
             print('Dumping data')
+            # 保存数据
             with open(save_data_name, 'wb') as f:
                 pickle.dump(data, f)
             set_seed(seed_num)

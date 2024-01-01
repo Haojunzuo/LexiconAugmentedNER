@@ -11,12 +11,13 @@ def normalize_word(word):
     new_word = ""
     for char in word:
         if char.isdigit():
-            new_word += '0'
+            new_word += '0' # 如果是数字 直接替换为0
         else:
             new_word += char
     return new_word
 
-
+# 使用数据集、词、字、二元词、gaz、标签字母表、构建instence_texts和instance_ids，也就是使用每个句子获得其中的词列表、字列表、二元词列表、gaz列表等，方便训练时使用。
+# 其中instance_ids包含：[word_Ids, biword_Ids, char_Ids, gaz_Ids, label_Ids, gazs, gazs_count, gaz_char_Id, layergazmasks,gazchar_masks, bert_text_ids]
 def read_instance_with_gaz(num_layer, input_file, gaz, word_alphabet, biword_alphabet, biword_count, char_alphabet, gaz_alphabet, gaz_count, gaz_split, label_alphabet, number_normalized, max_sent_length, char_padding_size=-1, char_padding_symbol = '</pad>'):
 
     tokenizer = BertTokenizer.from_pretrained('bert-base-chinese', do_lower_case=True)
@@ -181,7 +182,8 @@ def read_instance_with_gaz(num_layer, input_file, gaz, word_alphabet, biword_alp
 
     return instence_texts, instence_Ids
 
-
+# 加载预训练词嵌入[word_alphabet.size(), embedd_dim]，并构建预训练词嵌入的存储结构，词表（数据集）中的词如果不在词典中，会随机初始化，并设置not_match++，如果匹配则使用词向量。
+# 返回 pretrain_emb，是词表对应的词嵌入。
 def build_pretrain_embedding(embedding_path, word_alphabet, embedd_dim=100, norm=True):    
     embedd_dict = dict()
     if embedding_path != None:

@@ -1,4 +1,7 @@
 import collections
+
+
+# 前缀树，由词嵌入表生成。
 class TrieNode:
     # Initialize your data structure here.
     def __init__(self):
@@ -9,6 +12,7 @@ class Trie:
     def __init__(self):
         self.root = TrieNode()
 
+    # 插入前缀树，对于一个词，递归遍历每个字，加深树的深度，进行插入。
     def insert(self, word):
         
         current = self.root
@@ -32,7 +36,7 @@ class Trie:
                 return False
         return True
 
-
+    # 给定单词，获取前缀树匹配到的词，一开始为最大长度，后来递减为1，例如中华人民，中华人，中华，中。
     def enumerateMatch(self, word, space="_", backward=False):  #space=‘’
         matched = []
 

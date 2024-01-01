@@ -3,7 +3,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
-from model.crf import CRF
+# from model.crf import CRF
+from model.crf_masked import CRF
 from model.layers import NERmodel
 from transformers.modeling_bert import BertModel
 
@@ -11,6 +12,7 @@ class GazLSTM(nn.Module):
     def __init__(self, data):
         super(GazLSTM, self).__init__()
 
+        # 主要设置了biword_embedding、gaz_embedding、word_embedding和relay_emb等内容
         self.gpu = data.HP_gpu
         self.use_biword = data.use_bigram
         self.hidden_dim = data.HP_hidden_dim
@@ -26,12 +28,21 @@ class GazLSTM(nn.Module):
         self.model_type = data.model_type
         self.use_bert = data.use_bert
 
+        self.train_relay_emb = data.train_relay_emb
+        self.dev_relay_emb = data.dev_relay_emb
+        self.test_relay_emb = data.test_relay_emb
+        self.window_size = data.window_size
+        self.linear1 = nn.Linear(768, 1018)
+        self.linear2 = nn.Linear(1018, 1018)
+        self.tanh = nn.Tanh()
+        self.dropout = nn.Dropout(0.1)
+
         scale = np.sqrt(3.0 / self.gaz_emb_dim)
-        data.pretrain_gaz_embedding[0,:] = np.random.uniform(-scale, scale, [1, self.gaz_emb_dim])
+        data.pretrain_gaz_embedding[0,:] = np.random.uniform(-scale, scale, [1, self.gaz_emb_dim]) # gaz_embedding 随机初始化了？
 
         if self.use_char:
             scale = np.sqrt(3.0 / self.word_emb_dim)
-            data.pretrain_word_embedding[0,:] = np.random.uniform(-scale, scale, [1, self.word_emb_dim])
+            data.pretrain_word_embedding[0,:] = np.random.uniform(-scale, scale, [1, self.word_emb_dim]) # word_embedding 随机初始化了？
 
         self.gaz_embedding = nn.Embedding(data.gaz_alphabet.size(), self.gaz_emb_dim)
         self.word_embedding = nn.Embedding(data.word_alphabet.size(), self.word_emb_dim)
@@ -62,6 +73,7 @@ class GazLSTM(nn.Module):
         if self.use_bert:
             char_feature_dim = char_feature_dim + 768
 
+        # 设置模型类型，有LSTM、CNN、Transformer三种
         ## lstm model
         if self.model_type == 'lstm':
             lstm_hidden = self.hidden_dim
@@ -79,26 +91,31 @@ class GazLSTM(nn.Module):
 
         self.drop = nn.Dropout(p=data.HP_dropout)
         self.hidden2tag = nn.Linear(self.hidden_dim, data.label_alphabet_size+2)
-        self.crf = CRF(data.label_alphabet_size, self.gpu)
-
+        # self.crf = CRF(data.label_alphabet_size, self.gpu)
+        data.label_alphabet.instance2index['</unk>'] = 0
+        self.crf = CRF(data.label_alphabet_size, self.gpu, data.label_alphabet.instance2index)
         if self.use_bert:
-            self.bert_encoder = BertModel.from_pretrained('bert-base-chinese')
+            self.bert_encoder = BertModel.from_pretrained('/mnt/cjhb/NER/LexiconAugmentedNER/bert/bert-base-chinese')
             for p in self.bert_encoder.parameters():
+                # 不微调
                 p.requires_grad = False
 
         if self.gpu:
-            self.gaz_embedding = self.gaz_embedding.cuda()
-            self.word_embedding = self.word_embedding.cuda()
+            self.gaz_embedding = self.gaz_embedding.cuda(1)
+            self.word_embedding = self.word_embedding.cuda(1)
             if self.use_biword:
-                self.biword_embedding = self.biword_embedding.cuda()
-            self.NERmodel = self.NERmodel.cuda()
-            self.hidden2tag = self.hidden2tag.cuda()
-            self.crf = self.crf.cuda()
-
+                self.biword_embedding = self.biword_embedding.cuda(1)
+            self.NERmodel = self.NERmodel.cuda(1)
+            self.hidden2tag = self.hidden2tag.cuda(1)
+            self.crf = self.crf.cuda(1)
+            self.linear1.cuda(1)
+            self.linear2.cuda(1)
+            self.tanh.cuda(1)
+            self.dropout.cuda(1)
             if self.use_bert:
-                self.bert_encoder = self.bert_encoder.cuda()
+                self.bert_encoder = self.bert_encoder.cuda(1)
 
-    def get_tags(self,gaz_list, word_inputs, biword_inputs, layer_gaz, gaz_count, gaz_chars, gaz_mask_input, gazchar_mask_input, mask, word_seq_lengths, batch_bert, bert_mask):
+    def get_tags(self,gaz_list, word_inputs, biword_inputs, layer_gaz, gaz_count, gaz_chars, gaz_mask_input, gazchar_mask_input, mask, word_seq_lengths, batch_bert, bert_mask, cur_type, batch_id, batch_size):
 
         batch_size = word_inputs.size()[0]
         seq_len = word_inputs.size()[1]
@@ -121,7 +138,7 @@ class GazLSTM(nn.Module):
             gazchar_embeds = self.word_embedding(gaz_chars)
 
             gazchar_mask = gazchar_mask_input.unsqueeze(-1).repeat(1,1,1,1,1,self.word_emb_dim)
-            gazchar_embeds = gazchar_embeds.data.masked_fill_(gazchar_mask.data, 0)  #(b,l,4,gl,cl,ce)
+            gazchar_embeds = gazchar_embeds.data.masked_fill_(gazchar_mask.data.bool(), 0)  #(b,l,4,gl,cl,ce)
 
             # gazchar_mask_input:(b,l,4,gl,cl)
             gaz_charnum = (gazchar_mask_input == 0).sum(dim=-1, keepdim=True).float()  #(b,l,4,gl,1)
@@ -143,7 +160,7 @@ class GazLSTM(nn.Module):
 
             gaz_mask = gaz_mask_input.unsqueeze(-1).repeat(1,1,1,1,self.gaz_emb_dim)
 
-            gaz_embeds = gaz_embeds_d.data.masked_fill_(gaz_mask.data, 0)  #(b,l,4,g,ge)  ge:gaz_embed_dim
+            gaz_embeds = gaz_embeds_d.data.masked_fill_(gaz_mask.data.bool(), 0)  #(b,l,4,g,ge)  ge:gaz_embed_dim
 
 
         if self.use_count:
@@ -168,34 +185,76 @@ class GazLSTM(nn.Module):
 
         ### cat bert feature
         if self.use_bert:
-            seg_id = torch.zeros(bert_mask.size()).long().cuda()
+            seg_id = torch.zeros(bert_mask.size()).long().cuda(1)
             outputs = self.bert_encoder(batch_bert, bert_mask, seg_id)
             outputs = outputs[0][:,1:-1,:]
-            word_input_cat = torch.cat([word_input_cat, outputs], dim=-1)
+            word_input_cat = torch.cat([word_input_cat, outputs], dim=-1) # 此处是向量拼接，维度多少没有关系，但是使用上下文特征，必须匹配才行
 
-
-        feature_out_d = self.NERmodel(word_input_cat)
-
+        # 此处进行LSTM处理计算，所以添加跨句上下文特征的修改应该在这里，但是之前的star-transformer的输出维度是768，当前不加bert的情况下，字符的嵌入维度为250，需要解决维度不匹配的问题。
+        # 需要一个线性层进行映射
+        # start = batch_id * batch_size + 8
+        # end = (batch_id + 1) * batch_size + 8
+        # leftTensor = torch.empty((batch_size, 0, 768), dtype=torch.float32).cuda(1)
+        # rightTensor = torch.empty((batch_size, 0, 768), dtype=torch.float32).cuda(1)
+        # if cur_type == 'train':
+        #     for i in reversed(range(self.window_size)):
+        #         tempLast = self.train_relay_emb[start - i - 1: end - i - 1].reshape(batch_size, 1, 768).cuda(1)
+        #         leftTensor = torch.cat([leftTensor, tempLast], dim=1)
+        #     leftTensor = self.dropout(self.linear2(self.tanh(self.linear1(leftTensor))))
+        #     word_input_cat = torch.cat([leftTensor, word_input_cat], dim=1)
+        #     for i in range(self.window_size):
+        #         tempNext = self.train_relay_emb[start + i + 1: end + i + 1].reshape(batch_size, 1, 768).cuda(1)
+        #         rightTensor = torch.cat([rightTensor, tempNext], dim=1)
+        #     rightTensor = self.dropout(self.linear2(self.tanh(self.linear1(rightTensor))))
+        #     word_input_cat = torch.cat([word_input_cat, rightTensor], dim=1)
+        # elif cur_type == 'dev':
+        #     for i in reversed(range(self.window_size)):
+        #         tempLast = self.dev_relay_emb[start - i - 1: end - i - 1].reshape(batch_size, 1, 768).cuda(1)
+        #         leftTensor = torch.cat([leftTensor, tempLast], dim=1)
+        #     leftTensor = self.dropout(self.linear2(self.tanh(self.linear1(leftTensor))))
+        #     word_input_cat = torch.cat([leftTensor, word_input_cat], dim=1)
+        #     for i in range(self.window_size):
+        #         tempNext = self.dev_relay_emb[start + i + 1: end + i + 1].reshape(batch_size, 1, 768).cuda(1)
+        #         rightTensor = torch.cat([rightTensor, tempNext], dim=1)
+        #     rightTensor = self.dropout(self.linear2(self.tanh(self.linear1(rightTensor))))
+        #     word_input_cat = torch.cat([word_input_cat, rightTensor], dim=1)
+        # elif cur_type == 'test':
+        #     for i in reversed(range(self.window_size)):
+        #         tempLast = self.test_relay_emb[start - i - 1: end - i - 1].reshape(batch_size, 1, 768).cuda(1)
+        #         leftTensor = torch.cat([leftTensor, tempLast], dim=1)
+        #     leftTensor = self.dropout(self.linear2(self.tanh(self.linear1(leftTensor))))
+        #     word_input_cat = torch.cat([leftTensor, word_input_cat], dim=1)
+        #     for i in range(self.window_size):
+        #         tempNext = self.test_relay_emb[start + i + 1: end + i + 1].reshape(batch_size, 1, 768).cuda(1)
+        #         rightTensor = torch.cat([rightTensor, tempNext], dim=1)
+        #     rightTensor = self.dropout(self.linear2(self.tanh(self.linear1(rightTensor))))
+        #     word_input_cat = torch.cat([word_input_cat, rightTensor], dim=1)
+        feature_out_d = self.NERmodel(word_input_cat) # [batch_size, sentence_len, dim] 例[1, 6, 250]
+        # indices = torch.tensor([i for i in range(self.window_size, word_inputs.size()[1] + self.window_size)]).cuda(1) # 只取需要使用的部分
+        # feature_out_d = torch.index_select(feature_out_d, 1, indices)
         tags = self.hidden2tag(feature_out_d)
 
         return tags, gaz_match
 
 
 
-    def neg_log_likelihood_loss(self, gaz_list, word_inputs, biword_inputs, word_seq_lengths, layer_gaz, gaz_count, gaz_chars, gaz_mask, gazchar_mask, mask, batch_label, batch_bert, bert_mask):
+    def neg_log_likelihood_loss(self, gaz_list, word_inputs, biword_inputs, word_seq_lengths, layer_gaz, gaz_count, gaz_chars, gaz_mask, gazchar_mask, mask, batch_label, batch_bert, bert_mask, batch_id, batch_size):
 
-        tags, _ = self.get_tags(gaz_list, word_inputs, biword_inputs, layer_gaz, gaz_count,gaz_chars, gaz_mask, gazchar_mask, mask, word_seq_lengths, batch_bert, bert_mask)
+        # .get_tags方法根据输入的批次内容，计算出tags，实际上就是LSTM的输出内容。
+        tags, _ = self.get_tags(gaz_list, word_inputs, biword_inputs, layer_gaz, gaz_count,gaz_chars, gaz_mask, gazchar_mask, mask, word_seq_lengths, batch_bert, bert_mask, 'train', batch_id, batch_size)
 
+        # 根据上一步计算出的tags和真实标签，计算总的损失。
         total_loss = self.crf.neg_log_likelihood_loss(tags, mask, batch_label)
+        # 计算分数和标签序列。
         scores, tag_seq = self.crf._viterbi_decode(tags, mask)
 
         return total_loss, tag_seq
 
 
+    # 正向计算，gaz_match好像没用
+    def forward(self, gaz_list, word_inputs, biword_inputs, word_seq_lengths,layer_gaz, gaz_count,gaz_chars, gaz_mask,gazchar_mask, mask, batch_bert, bert_mask, cur_type, batch_id, batch_size):
 
-    def forward(self, gaz_list, word_inputs, biword_inputs, word_seq_lengths,layer_gaz, gaz_count,gaz_chars, gaz_mask,gazchar_mask, mask, batch_bert, bert_mask):
-
-        tags, gaz_match = self.get_tags(gaz_list, word_inputs, biword_inputs, layer_gaz, gaz_count,gaz_chars, gaz_mask, gazchar_mask, mask, word_seq_lengths, batch_bert, bert_mask)
+        tags, gaz_match = self.get_tags(gaz_list, word_inputs, biword_inputs, layer_gaz, gaz_count,gaz_chars, gaz_mask, gazchar_mask, mask, word_seq_lengths, batch_bert, bert_mask, cur_type, batch_id, batch_size)
 
         scores, tag_seq = self.crf._viterbi_decode(tags, mask)
 
